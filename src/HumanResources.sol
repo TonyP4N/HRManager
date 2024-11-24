@@ -3,9 +3,8 @@ pragma solidity ^0.8.24;
 
 import "./interfaces/IHumanResources.sol";
 import "../lib/v3-periphery/contracts/interfaces/ISwapRouter.sol";
+import "../lib/chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
 import "../lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
-import "../lib/v3-periphery/contracts/interfaces/IAggregatorV3Interface.sol";
-
 
 abstract contract HumanResources is IHumanResources {
 
