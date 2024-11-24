@@ -64,8 +64,10 @@ This repository contains the **HRManager** Solidity smart contract, designed to 
    git clone https://github.com/TonyP4N/HRManager.git
    cd HRManager
 2. **Install Dependencies**:
-   ```bash
-   forge install
+    Run the following commands to install the required dependencies for the project:
+    
+    ```bash
+    bash install.sh
 3. **Build the Contracts**:
     ```bash
     forge build
