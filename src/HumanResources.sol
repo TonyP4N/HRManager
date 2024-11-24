@@ -2,7 +2,7 @@
 pragma solidity ^0.8.24;
 
 import "./interfaces/IHumanResources.sol";
-import "@uniswap/v3-periphery/contracts/interfaces/ISwapRouter.sol";
+import "../lib/v3-periphery/contracts/interfaces/ISwapRouter.sol";
 
 interface AggregatorV3Interface {
   function decimals() external view returns (uint8);
