@@ -10,18 +10,21 @@ abstract contract HumanResources is IHumanResources {
 
     address public immutable hrManager;
     uint256 private weeklyUsdSalary;
+    uint256 private activeEmployeeCount;
+
     AggregatorV3Interface internal priceFeed;
     ISwapRouter public immutable swapRouter;
 
     mapping (address => uint256) private activeDays;
-    mapping(address => uint256) private registerTime;
+    mapping(address => uint256) private employedSince;
+    mapping(address => uint256) private terminatedAt;
     mapping(address => uint256) private weeklyUsdSalaries;
+   
     mapping(address => bool) private employee;
     mapping(address => bool) private isFirstTimeRegistered;
     mapping(address => bool) private isFreezedAccSalary;
     mapping(address => uint256) private preferredCurrency; // 1 for USDC, 0 for ETH
- 
-    
+
 
     modifier onlyHRManager() {
         if (msg.sender != hrManager) {
@@ -44,30 +47,28 @@ abstract contract HumanResources is IHumanResources {
     }
 
     function registerSalary(address _employee) internal {
-    /// The salary accumulates with time (regardless of nights, weekends, and other non-working hours) 
-    /// according to the employee's weekly salary
-    /// This means that after 2 days, the employee will be able to withdraw 2/7th of their weekly salary
-    /// At start, the activive days are 0
         activeDays[_employee] = 0;
-        registerTime[_employee] = block.timestamp;
+        employedSince[_employee] = block.timestamp;
         
     }
 
     function registerEmployee(address _employee, uint256 _weeklyUsdSalary) external onlyHRManager {
         require(employee[_employee], EmployeeAlreadyRegistered());
         employee[_employee] = true;
-        weeklyUsdSalaries[_employee] = _weeklyUsdSalary;
-        registerTime[_employee] = block.timestamp;
+        weeklyUsdSalaries[_employee] = _weeklyUsdSalary * 10**18;
 
         if (isFirstTimeRegistered[_employee]) {
             isFirstTimeRegistered[_employee] = false;
+            isFreezedAccSalary[_employee] = false;
             registerSalary(_employee);
             preferredCurrency[_employee] = 1;
+            activeEmployeeCount += 1;
 
             emit EmployeeRegistered(_employee, weeklyUsdSalary);
         } else {
             isFreezedAccSalary[_employee] = false;
-
+            activeEmployeeCount += 1;
+            
             emit EmployeeRegistered(_employee, weeklyUsdSalary);
         }
     }
@@ -77,13 +78,15 @@ abstract contract HumanResources is IHumanResources {
         employee[_employee] = false;
         isFirstTimeRegistered[_employee] = false;
         isFreezedAccSalary[_employee] = true;
+        terminatedAt[_employee] = block.timestamp;
+        activeEmployeeCount -= 1;
 
         emit EmployeeTerminated(_employee);
         
     }
 
     function sendSalary(address payable _employee, uint256 amount) internal {
-        // send USDC to the employee
+
         _employee.transfer(amount);
     }
 
@@ -145,8 +148,8 @@ abstract contract HumanResources is IHumanResources {
         require(employee[msg.sender], NotAuthorized());
         require(!isFreezedAccSalary[msg.sender], "You have not terminated your contract yet");
 
-        // Calculate the amount of salary to be paid
-        uint256 timeStampDiff = block.timestamp - registerTime[msg.sender];
+        // Calculate salary
+        uint256 timeStampDiff = terminatedAt[msg.sender] - employedSince[msg.sender];
         uint256 usdcAmount = (timeStampDiff * weeklyUsdSalary) / 604800;
 
         if (preferredCurrency[msg.sender] == 1) { // USDC
@@ -162,8 +165,38 @@ abstract contract HumanResources is IHumanResources {
     }
 
 
+    function salaryAvailable(address _employee) external view returns (uint256) {
+        require(employee[_employee], EmployeeNotRegistered());
+        require(!isFreezedAccSalary[_employee], "You have not terminated your contract yet");
 
+        uint256 timeStampDiff = block.timestamp - employedSince[_employee];
+        
+        if (preferredCurrency[_employee] == 1) { // USDC
+            return (timeStampDiff * weeklyUsdSalaries[_employee]) / 604800;
+        } else if (preferredCurrency[_employee] == 0) { // ETH
+            uint256 usdcAmount = (timeStampDiff * weeklyUsdSalaries[_employee]) / 604800;
+            return (usdcAmount * 10**18) / getLatestETHPrice();
+        } else {
+            revert("Currency not supported");
+        }
+    }
 
+    // function hrManager() external view returns (address) {
+    //     return hrManager;
+    // }
+
+    function getActiveEmployeeCount() external view override returns (uint256) {
+        
+        return activeEmployeeCount;
+    }
+
+    function getEmployeeInfo(address _employee) external view override returns (uint256, uint256, uint256) {
+        if (!employee[_employee]) {
+            return (0, 0, 0);
+        }
+        
+        return (weeklyUsdSalaries[_employee], employedSince[_employee], terminatedAt[_employee]);
+    }
 
 
     receive() external payable {}
