@@ -183,8 +183,3 @@ abstract contract HumanResources is IHumanResources {
 }
 
 
-//问题:
-//1. 为什么要用abstract contract HumanResources is IHumanResources, 而不是contract HumanResources is IHumanResources
-//2. 改了withdrawalSalary为Public，需要在IHumanResources中也改吗？
-//3. CurrencySwitched函数中，isETH代表什么?
-//4. 如果一个员工工作时间没有满一天，工资怎么算？
