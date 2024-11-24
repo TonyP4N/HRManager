@@ -1,0 +1,1 @@
+{"id":"dfd009b2fecbb9e4a080d4e01c4d2c77","source_id_to_path":{"0":"lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol","1":"lib/v3-core/contracts/interfaces/callback/IUniswapV3SwapCallback.sol","2":"lib/v3-periphery/contracts/interfaces/ISwapRouter.sol","3":"src/HumanResources.sol","4":"src/interfaces/IHumanResources.sol"},"language":"Solidity"}

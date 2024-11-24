@@ -3,6 +3,7 @@ pragma solidity ^0.8.24;
 
 import "./interfaces/IHumanResources.sol";
 import "../lib/v3-periphery/contracts/interfaces/ISwapRouter.sol";
+import "../lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 
 interface AggregatorV3Interface {
   function decimals() external view returns (uint8);
@@ -30,6 +31,7 @@ abstract contract HumanResources is IHumanResources {
 
     mapping (address => uint256) private activeDays;
     mapping(address => uint256) private registerTime;
+    mapping(address => uint256) private weeklyUsdSalaries;
     mapping(address => bool) private employee;
     mapping(address => bool) private isFirstTimeRegistered;
     mapping(address => bool) private isFreezedAccSalary;
@@ -67,9 +69,11 @@ abstract contract HumanResources is IHumanResources {
         
     }
 
-    function registerEmployee(address _employee, uint256 weeklyUsdSalary) external onlyHRManager {
+    function registerEmployee(address _employee, uint256 _weeklyUsdSalary) external onlyHRManager {
         require(employee[_employee], EmployeeAlreadyRegistered());
         employee[_employee] = true;
+        weeklyUsdSalaries[_employee] = _weeklyUsdSalary;
+        registerTime[_employee] = block.timestamp;
 
         if (isFirstTimeRegistered[_employee]) {
             isFirstTimeRegistered[_employee] = false;
@@ -112,14 +116,13 @@ abstract contract HumanResources is IHumanResources {
         return uint256(price) * 10**10; // Convert price to 18 decimals
     }
     
+    
     function swapUSDCToETH(uint256 usdcAmount) internal returns (uint256 ethAmount) {
         require(usdcAmount > 0, "Amount must be greater than zero");
 
-        // Approve Uniswap Router to spend USDC
         IERC20 usdcToken = IERC20(0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85); // USDC address on Optimism
         usdcToken.approve(address(swapRouter), usdcAmount);
 
-        // Define swap parameters
         ISwapRouter.ExactInputSingleParams memory params = ISwapRouter.ExactInputSingleParams({
             tokenIn: address(usdcToken),
             tokenOut: address(0x4200000000000000000000000000000000000006), // WETH address on Optimism
@@ -136,27 +139,23 @@ abstract contract HumanResources is IHumanResources {
     }
 
 
-    function switchCurrency() external onlyEmployee() {
+    function switchCurrency() external onlyEmployee {
 
-        require(employee[msg.sender], NotAuthorized());
-        require(!isFreezedAccSalary[msg.sender], "You have to terminated your contract first!");
-        
-           // 1 for USDC, 0 for ETH
-        if (preferredCurrency[msg.sender] == 1) {
+        require(employee[msg.sender], "Not authorized");
+        require(!isFreezedAccSalary[msg.sender], "You have not terminated your contract yet");
+
+        withdrawSalary();
+
+
+        if (preferredCurrency[msg.sender] == 1) { 
             preferredCurrency[msg.sender] = 0;
             emit CurrencySwitched(msg.sender, true);
-        } else if (preferredCurrency[msg.sender] == 0) {
+        } else {
             preferredCurrency[msg.sender] = 1;
             emit CurrencySwitched(msg.sender, false);
-        } else {
-            revert("Currency not supported");
         }
-
-        
-       withdrawSalary();
-
-
     }
+
 
     function withdrawSalary() public onlyEmployee {
         require(employee[msg.sender], NotAuthorized());
@@ -177,6 +176,9 @@ abstract contract HumanResources is IHumanResources {
             revert("Currency not supported");
         }
     }
+
+
+    
 
 
     receive() external payable {}
