@@ -2,12 +2,18 @@
 pragma solidity ^0.8.24;
 
 import "./interfaces/IHumanResources.sol";
+
 import "../lib/v3-periphery/contracts/interfaces/ISwapRouter.sol";
 import "../lib/chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
-import "../lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+// Security
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/Address.sol";
 
 
-contract HumanResources is IHumanResources {
+contract HumanResources is IHumanResources, ReentrancyGuard {
 
     address public immutable hrManager;
     uint256 private weeklyUsdSalary;
@@ -27,6 +33,9 @@ contract HumanResources is IHumanResources {
     mapping(address => bool) private isFreezedAccSalary;
     mapping(address => uint256) private preferredCurrency; // 1 for USDC, 0 for ETH
 
+    // Security
+    using Address for address payable;
+    using SafeERC20 for IERC20;
 
     modifier onlyHRManager() {
         if (msg.sender != hrManager) {
@@ -64,7 +73,7 @@ contract HumanResources is IHumanResources {
         if (isFirstTimeRegistered[_employee]) {
             isFirstTimeRegistered[_employee] = false;
             isFreezedAccSalary[_employee] = false;
-            unclaimedUsdSalaries[_employee] = 0; //initialize unclaimed salary
+            unclaimedUsdSalaries[_employee] = 0 * 10**18; //initialize unclaimed salary
             registerSalary(_employee);
             preferredCurrency[_employee] = 1;
 
@@ -86,17 +95,17 @@ contract HumanResources is IHumanResources {
         isFirstTimeRegistered[_employee] = false;
         isFreezedAccSalary[_employee] = true;
         terminatedAt[_employee] = block.timestamp;
-        totalUsdSalaries[_employee] = ((terminatedAt[_employee] - employedSince[_employee]) * weeklyUsdSalaries[_employee] / 604800) + unclaimedUsdSalaries[_employee];
+        totalUsdSalaries[_employee] = (((terminatedAt[_employee] - employedSince[_employee]) * weeklyUsdSalaries[_employee] / 604800) * 10**18) + unclaimedUsdSalaries[_employee];
         activeEmployeeCount -= 1;
 
         emit EmployeeTerminated(_employee);
         
     }
 
-
-    function sendSalary(address payable _employee, uint256 amount) internal {
-
-        _employee.transfer(amount);
+    
+    function sendSalary(address payable _employee, uint256 amount) internal nonReentrant() {
+        require(address(this).balance >= amount, "Insufficient contract balance");
+        _employee.sendValue(amount);
     }
 
 
@@ -116,13 +125,15 @@ contract HumanResources is IHumanResources {
     
     function swapUSDCToETH(uint256 usdcAmount) internal returns (uint256 ethAmount) {
         require(usdcAmount > 0, "Amount must be greater than zero");
-
-        IERC20 usdcToken = IERC20(0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85); // USDC address on Optimism
-        usdcToken.approve(address(swapRouter), usdcAmount);
+        
+        IERC20 usdcToken = IERC20(0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85); // USDC address
+        
+        require(usdcToken.approve(address(swapRouter), 0), "Reset approve failed");
+        require(usdcToken.approve(address(swapRouter), usdcAmount), "Approve failed");
 
         ISwapRouter.ExactInputSingleParams memory params = ISwapRouter.ExactInputSingleParams({
             tokenIn: address(usdcToken),
-            tokenOut: address(0x4200000000000000000000000000000000000006), // WETH address on Optimism
+            tokenOut: address(0x4200000000000000000000000000000000000006), // WETH address
             fee: 3000, // Pool fee: 0.3%
             recipient: address(this),
             deadline: block.timestamp + 15, // Transaction must execute within 15 seconds
@@ -131,16 +142,15 @@ contract HumanResources is IHumanResources {
             sqrtPriceLimitX96: 0
         });
 
-        // Execute the swap
         ethAmount = swapRouter.exactInputSingle(params);
     }
 
 
-    function switchCurrency() external onlyEmployee {
+    function switchCurrency() external override onlyEmployee nonReentrant() {
         require(employee[msg.sender], "Not authorized");
         require(!isFreezedAccSalary[msg.sender], "You have terminated your contract");
 
-        withdrawSalary();
+        withdrawSalary(); // this is why withdrawSalary is public
 
         if (preferredCurrency[msg.sender] == 1) { 
             preferredCurrency[msg.sender] = 0;
@@ -152,7 +162,7 @@ contract HumanResources is IHumanResources {
     }
 
 
-    function withdrawSalary() public onlyEmployee {
+    function withdrawSalary() public override onlyEmployee nonReentrant {
         require(employee[msg.sender], NotAuthorized());
         require(isFreezedAccSalary[msg.sender], "You have not terminated your contract yet");
 
