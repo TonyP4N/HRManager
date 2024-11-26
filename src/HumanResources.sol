@@ -182,11 +182,8 @@ contract HumanResources is IHumanResources, ReentrancyGuard {
 
 
     function withdrawSalary() public override onlyEmployee nonReentrant {
+        
         Employee storage emp = employees[msg.sender]; // get employee info from database
-
-        // if (emp.isActive) {
-        //     revert ("You are still an active employee");
-        // }
 
         uint256 endTime = emp.isActive ? block.timestamp : emp.terminatedAt;
         uint256 startTime = emp.lastWithdrawalTime;
