@@ -4,13 +4,18 @@ pragma solidity ^0.8.24;
 import "./interfaces/IHumanResources.sol";
 
 import "../lib/v3-periphery/contracts/interfaces/ISwapRouter.sol";
-import "../lib/chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {AggregatorV3Interface} from "../lib/chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
+import {IERC20} from "../lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 
 // Security
-import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/utils/Address.sol";
+import {SafeERC20} from "../lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
+import {ReentrancyGuard} from "../lib/openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol";
+import {Address} from "../lib/openzeppelin-contracts/contracts/utils/Address.sol";
+
+
+interface IWETH9 {
+    function withdraw(uint256 wad) external;
+} 
 
 
 contract HumanResources is IHumanResources, ReentrancyGuard {
@@ -18,24 +23,34 @@ contract HumanResources is IHumanResources, ReentrancyGuard {
     address public immutable hrManager;
     uint256 private weeklyUsdSalary;
     uint256 private activeEmployeeCount;
+    uint256 private unclaimedUsdSalaries;
 
     AggregatorV3Interface internal priceFeed;
     ISwapRouter public immutable swapRouter;
 
-    mapping(address => uint256) private employedSince;
-    mapping(address => uint256) private terminatedAt;
-    mapping(address => uint256) private totalUsdSalaries;
-    mapping(address => uint256) private unclaimedUsdSalaries;
-    mapping(address => uint256) private weeklyUsdSalaries;
-   
-    mapping(address => bool) private employee;
+    IERC20 public immutable usdcToken;
+    address public immutable WETH9;
+
+    uint256 private constant SECONDS_IN_A_WEEK = 604800;
+
     mapping(address => bool) private isFirstTimeRegistered;
-    mapping(address => bool) private isFreezedAccSalary;
-    mapping(address => uint256) private preferredCurrency; // 1 for USDC, 0 for ETH
+    mapping(address => Employee) private employees;
 
     // Security
     using Address for address payable;
     using SafeERC20 for IERC20;
+
+    struct Employee {
+        uint256 weeklyUsdSalary;
+        uint256 employedSince;
+        uint256 terminatedAt;
+        uint256 lastWithdrawalTime;
+        uint256 totalUsdSalaries;
+        uint activeEmployeeCount;
+        bool isActive;
+        bool prefersEth;
+    }
+    
 
     modifier onlyHRManager() {
         if (msg.sender != hrManager) {
@@ -45,9 +60,10 @@ contract HumanResources is IHumanResources, ReentrancyGuard {
     }
 
     modifier onlyEmployee() {
-        if (!employee[msg.sender]) {
+        Employee storage emp = employees[msg.sender]; //store employee info to a storage variable(Database)
+        if (!emp.isActive && emp.employedSince == 0 && emp.totalUsdSalaries == 0) {
             revert NotAuthorized();
-        }
+        } // not active, not employed, no salary
         _;
     }
 
@@ -55,57 +71,53 @@ contract HumanResources is IHumanResources, ReentrancyGuard {
         hrManager = msg.sender;
         priceFeed = AggregatorV3Interface(0x13e3Ee699D1909E989722E753853AE30b17e08c5);
         swapRouter = ISwapRouter(0xE592427A0AEce92De3Edee1F18E0157C05861564);
+        usdcToken = IERC20(0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85); // USDC address on Optimism
+        WETH9 = 0x4200000000000000000000000000000000000006; // WETH address on Optimism
     }
 
 
-    function registerSalary(address _employee) internal {
-        employedSince[_employee] = block.timestamp;
+    function registerEmployee(address _employee, uint256 _weeklyUsdSalary) external override onlyHRManager {
+        require(_weeklyUsdSalary > 0, "Salary must be greater than zero");
+        if (employees[_employee].isActive) {
+            revert EmployeeAlreadyRegistered();
+        }
+
+        employees[_employee].isActive = true;
+        Employee storage emp = employees[_employee]; // register employee to database
+
+        emp.weeklyUsdSalary = _weeklyUsdSalary;
+        emp.employedSince = block.timestamp;
+        emp.lastWithdrawalTime = block.timestamp;
+        emp.prefersEth = false;
+
         activeEmployeeCount += 1;
+
+        emit EmployeeRegistered(_employee, _weeklyUsdSalary);
         
     }
 
 
-    function registerEmployee(address _employee, uint256 _weeklyUsdSalary) external onlyHRManager {
-        require(employee[_employee], EmployeeAlreadyRegistered());
-        employee[_employee] = true;
-        weeklyUsdSalaries[_employee] = _weeklyUsdSalary * 10**18;
-
-        if (isFirstTimeRegistered[_employee]) {
-            isFirstTimeRegistered[_employee] = false;
-            isFreezedAccSalary[_employee] = false;
-            unclaimedUsdSalaries[_employee] = 0 * 10**18; //initialize unclaimed salary
-            registerSalary(_employee);
-            preferredCurrency[_employee] = 1;
-
-            emit EmployeeRegistered(_employee, weeklyUsdSalary);
-        } else {
-            isFreezedAccSalary[_employee] = false;
-            unclaimedUsdSalaries[_employee] = unclaimedUsdSalaries[_employee] + totalUsdSalaries[_employee]; //keep unclaimed salary tracked
-            registerSalary(_employee);
-            
-            emit EmployeeRegistered(_employee, weeklyUsdSalary);
+    function terminateEmployee(address _employee) external override onlyHRManager {
+        if (!employees[_employee].isActive) {
+            revert EmployeeNotRegistered();
         }
-    }
 
+        Employee storage emp = employees[_employee]; // get employee info from database
 
-    function terminateEmployee(address _employee) external onlyHRManager {
-        require(!employee[_employee], EmployeeNotRegistered());
-        require(isFreezedAccSalary[_employee], EmployeeNotRegistered());
-        employee[_employee] = false;
-        isFirstTimeRegistered[_employee] = false;
-        isFreezedAccSalary[_employee] = true;
-        terminatedAt[_employee] = block.timestamp;
-        totalUsdSalaries[_employee] = (((terminatedAt[_employee] - employedSince[_employee]) * weeklyUsdSalaries[_employee] / 604800) * 10**18) + unclaimedUsdSalaries[_employee];
+        // Calculate salary
+        uint256 terminateTime = block.timestamp;
+        uint256 hireTime = terminateTime - emp.lastWithdrawalTime;
+        uint256 unclaimedSalary = (hireTime * emp.weeklyUsdSalary) / SECONDS_IN_A_WEEK;
+        emp.totalUsdSalaries += unclaimedSalary;
+
+        emp.isActive = false;
+        emp.terminatedAt = block.timestamp;
+        emp.lastWithdrawalTime = block.timestamp;
+
         activeEmployeeCount -= 1;
 
         emit EmployeeTerminated(_employee);
         
-    }
-
-    
-    function sendSalary(address payable _employee, uint256 amount) internal nonReentrant() {
-        require(address(this).balance >= amount, "Insufficient contract balance");
-        _employee.sendValue(amount);
     }
 
 
@@ -119,85 +131,108 @@ contract HumanResources is IHumanResources, ReentrancyGuard {
         ) = priceFeed.latestRoundData();
 
         require(price > 0, "Invalid price from oracle");
-        return uint256(price) * 10**10; // Convert price to 18 decimals
+
+        uint256 decimalsNum = priceFeed.decimals();
+        return uint256(price) * (10**(18 - decimalsNum)); // Convert price to 18 decimals
     }
     
     
     function swapUSDCToETH(uint256 usdcAmount) internal returns (uint256 ethAmount) {
         require(usdcAmount > 0, "Amount must be greater than zero");
         
-        IERC20 usdcToken = IERC20(0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85); // USDC address
-        
-        require(usdcToken.approve(address(swapRouter), 0), "Reset approve failed");
-        require(usdcToken.approve(address(swapRouter), usdcAmount), "Approve failed");
+        // Approve the router to spend USDC
+        usdcToken.safeIncreaseAllowance(address(swapRouter), usdcAmount / 1e12); // USDC has 6 decimals
+
+        // Consider slippage
+        uint256 ethPrice = getLatestETHPrice(); // 18 decimals
+        uint256 expectedEthAmount = ((usdcAmount * 1e18) / ethPrice); // Convert to USDC decimals (6)
+        uint256 expectedAmountOutMinimum = (expectedEthAmount * 98) / 100; // 2% slippage
 
         ISwapRouter.ExactInputSingleParams memory params = ISwapRouter.ExactInputSingleParams({
             tokenIn: address(usdcToken),
-            tokenOut: address(0x4200000000000000000000000000000000000006), // WETH address
+            tokenOut: WETH9,
             fee: 3000, // Pool fee: 0.3%
             recipient: address(this),
             deadline: block.timestamp + 15, // Transaction must execute within 15 seconds
-            amountIn: usdcAmount,
-            amountOutMinimum: (usdcAmount * 10**18) / getLatestETHPrice(), // 2% slippage
+            amountIn: usdcAmount / 1e12, // Convert to USDC decimals (6)
+            amountOutMinimum: expectedAmountOutMinimum, // The minimum amount of WETH9 we want to receive
             sqrtPriceLimitX96: 0
         });
 
-        ethAmount = swapRouter.exactInputSingle(params);
+        uint256 wethReceived = swapRouter.exactInputSingle(params);
+
+        // Unwrap WETH to ETH
+        IWETH9(WETH9).withdraw(wethReceived);
+
+        return wethReceived;
     }
 
 
-    function switchCurrency() external override onlyEmployee nonReentrant() {
-        require(employee[msg.sender], "Not authorized");
-        require(!isFreezedAccSalary[msg.sender], "You have terminated your contract");
-
+    function switchCurrency() external override onlyEmployee() {
+        
         withdrawSalary(); // this is why withdrawSalary is public
 
-        if (preferredCurrency[msg.sender] == 1) { 
-            preferredCurrency[msg.sender] = 0;
-            emit CurrencySwitched(msg.sender, true);
-        } else {
-            preferredCurrency[msg.sender] = 1;
-            emit CurrencySwitched(msg.sender, false);
-        }
+        Employee storage emp = employees[msg.sender]; // get employee info from database
+
+        emp.prefersEth = !emp.prefersEth;
+
+        emit CurrencySwitched(msg.sender, emp.prefersEth);
+        
     }
 
 
     function withdrawSalary() public override onlyEmployee nonReentrant {
-        require(employee[msg.sender], NotAuthorized());
-        require(isFreezedAccSalary[msg.sender], "You have not terminated your contract yet");
+        Employee storage emp = employees[msg.sender]; // get employee info from database
 
-        if (preferredCurrency[msg.sender] == 1) { // USDC
-            sendSalary(payable(msg.sender), totalUsdSalaries[msg.sender]);
-            totalUsdSalaries[msg.sender] = 0;
-            emit SalaryWithdrawn(msg.sender, false, totalUsdSalaries[msg.sender]);
-        } else if (preferredCurrency[msg.sender] == 0) { // ETH
-            uint256 ethAmount = swapUSDCToETH(totalUsdSalaries[msg.sender]);
+        // if (emp.isActive) {
+        //     revert ("You are still an active employee");
+        // }
+
+        uint256 endTime = emp.isActive ? block.timestamp : emp.terminatedAt;
+        uint256 startTime = emp.lastWithdrawalTime;
+        uint256 timeDiff = endTime - startTime;
+        uint256 unclaimedSalary = (timeDiff * emp.weeklyUsdSalary) / SECONDS_IN_A_WEEK;
+
+        uint256 totalAmount = emp.totalUsdSalaries + unclaimedSalary;
+
+        emp.lastWithdrawalTime = block.timestamp;
+        emp.totalUsdSalaries = 0;
+
+        if (emp.prefersEth) {
+            uint256 ethAmount = swapUSDCToETH(totalAmount);
             payable(msg.sender).transfer(ethAmount);
-            totalUsdSalaries[msg.sender] = 0;
             emit SalaryWithdrawn(msg.sender, true, ethAmount);
         } else {
-            revert("Currency not supported");
+            usdcToken.safeTransfer(msg.sender, totalAmount / 1e12);
+            emit SalaryWithdrawn(msg.sender, false, totalAmount / 1e12);
         }
+
     }
 
 
-    function salaryAvailable(address _employee) external view returns (uint256) {
-        require(!isFreezedAccSalary[_employee], "You have not terminated your contract yet");
+    function salaryAvailable(address _employee) external view override returns (uint256) {
 
-        if (!employee[_employee]) {
+        Employee storage emp = employees[_employee];
+
+        if (!employees[_employee].isActive) {
             return 0;
+        }// employee not registered
+
+        // Calculate salary
+        uint256 endTime = emp.isActive ? block.timestamp : emp.terminatedAt;
+        uint256 startTime = emp.lastWithdrawalTime;
+        uint256 timeDiff = endTime - startTime;
+        uint256 unclaimedSalary = (timeDiff * emp.weeklyUsdSalary) / SECONDS_IN_A_WEEK;
+
+        uint256 totalAmount = emp.totalUsdSalaries + unclaimedSalary;
+
+        if (emp.prefersEth) {
+            uint256 ethAmount = (totalAmount * 1e18) / getLatestETHPrice();
+            return ethAmount;
+        } else {
+            return totalAmount / 1e12;
         }
 
-        uint256 timeStampDiff = block.timestamp - employedSince[_employee];
-        
-        if (preferredCurrency[_employee] == 1) { // USDC
-            return (timeStampDiff * weeklyUsdSalaries[_employee]) / 604800;
-        } else if (preferredCurrency[_employee] == 0) { // ETH
-            uint256 usdcAmount = (timeStampDiff * weeklyUsdSalaries[_employee]) / 604800;
-            return (usdcAmount * 10**18) / getLatestETHPrice();
-        } else {
-            revert("Currency not supported");
-        }
     }
 
 
@@ -207,15 +242,13 @@ contract HumanResources is IHumanResources, ReentrancyGuard {
 
 
     function getEmployeeInfo(address _employee) external view override returns (uint256, uint256, uint256) {
-        if (!employee[_employee]) {
+        Employee storage emp = employees[_employee];
+
+        if (!employees[_employee].isActive) {
             return (0, 0, 0);
-        }
-        if (isFreezedAccSalary[_employee]) {
-            uint256 salary = ((terminatedAt[_employee] - employedSince[_employee]) * weeklyUsdSalaries[_employee]) / 604800;
-            return (salary, employedSince[_employee], terminatedAt[_employee]);
-        }
-        
-        return (weeklyUsdSalaries[_employee], employedSince[_employee], terminatedAt[_employee]);
+        }// employee not registered
+
+        return (emp.weeklyUsdSalary, emp.employedSince, emp.terminatedAt);
     }
 
 
