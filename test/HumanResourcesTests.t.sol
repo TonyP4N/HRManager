@@ -17,6 +17,10 @@ import {Test, stdStorage, StdStorage} from "../lib/forge-std/src/Test.sol";
 import {HumanResources, IHumanResources} from "../src/HumanResources.sol";
 import {IERC20} from "../lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
 import {AggregatorV3Interface} from "../lib/chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
+import "../lib/v3-periphery/contracts/interfaces/ISwapRouter.sol";
+
+import "../lib/forge-std/src/console.sol";
+
 
 contract HumanResourcesTest is Test {
     using stdStorage for StdStorage;
@@ -27,6 +31,9 @@ contract HumanResourcesTest is Test {
         0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85;
     AggregatorV3Interface internal constant _ETH_USD_FEED =
         AggregatorV3Interface(0x13e3Ee699D1909E989722E753853AE30b17e08c5);
+    ISwapRouter internal constant _SWAP_ROUTER =
+        ISwapRouter(0xE592427A0AEce92De3Edee1F18E0157C05861564);
+
 
     HumanResources public humanResources;
 
@@ -169,6 +176,195 @@ contract HumanResourcesTest is Test {
         );
     }
 
+    // Additional test functions
+
+    function test_registerEmployee_zeroSalary() public {
+        vm.expectRevert(bytes("Salary must be greater than zero"));
+        _registerEmployee(alice, 0);
+    }
+
+    function test_reregisterEmployee_withoutWithdrawal() public {
+        _mintTokensFor(_USDC, address(humanResources), 10_000e6);
+        _registerEmployee(alice, aliceSalary);
+
+        skip(2 days);
+
+        vm.prank(hrManager);
+        humanResources.terminateEmployee(alice);
+
+        // Don't withdraw salary
+
+        _registerEmployee(alice, aliceSalary * 2);
+
+        skip(5 days);
+
+        vm.prank(alice);
+        humanResources.withdrawSalary();
+
+        uint256 unclaimedSalaryFirstPeriod = (aliceSalary * 2 days) / 7 days;
+        uint256 salarySecondPeriod = (aliceSalary * 2 * 5 days) / 7 days;
+        uint256 expectedTotalSalary = unclaimedSalaryFirstPeriod + salarySecondPeriod;
+
+        assertEq(
+            IERC20(_USDC).balanceOf(address(alice)),
+            expectedTotalSalary / 1e12
+        );
+    }
+
+    function test_terminateTerminatedEmployee() public {
+        _registerEmployee(alice, aliceSalary);
+        skip(2 days);
+
+        vm.prank(hrManager);
+        humanResources.terminateEmployee(alice);
+
+        vm.prank(hrManager);
+        vm.expectRevert(IHumanResources.EmployeeNotRegistered.selector);
+        humanResources.terminateEmployee(alice);
+    }
+
+    function test_terminatedEmployeeSwitch() public {
+        _mintTokensFor(_USDC, address(humanResources), 10_000e6);
+
+        _registerEmployee(alice, aliceSalary);
+        skip(2 days);
+
+        vm.prank(hrManager);
+        humanResources.terminateEmployee(alice);
+
+        vm.prank(alice);
+        vm.expectRevert(IHumanResources.EmployeeNotRegistered.selector);
+        humanResources.switchCurrency();
+
+    }
+
+    function test_terminatedEmployeeWithdraw() public {
+        _mintTokensFor(_USDC, address(humanResources), 10_000e6);
+
+        _registerEmployee(alice, aliceSalary);
+        skip(2 days);
+
+        vm.prank(hrManager);
+        humanResources.terminateEmployee(alice);
+
+        vm.prank(alice);
+        humanResources.withdrawSalary();
+        uint256 expectedSalary = ((aliceSalary * 2) / 7);
+        assertEq(
+            IERC20(_USDC).balanceOf(address(alice)),
+            expectedSalary / 1e12
+        );
+    }
+
+    function test_nonHrManagerRegisterEmployee() public {
+        vm.prank(alice);
+        vm.expectRevert(IHumanResources.NotAuthorized.selector);
+        humanResources.registerEmployee(alice, aliceSalary);
+    }
+
+    function test_swapUSDCToETH_slippageExceeds2Percent() public {
+        _mintTokensFor(_USDC, address(humanResources), 10_000e6);
+
+        _registerEmployee(alice, aliceSalary);
+        vm.prank(alice);
+        humanResources.switchCurrency();
+
+        skip(1 weeks);
+
+        uint256 ethPrice = humanResources.getLatestETHPrice();
+        uint256 expectedEthAmount = (aliceSalary * 1e18) / ethPrice;
+        uint256 expectedAmountOutMinimum = (expectedEthAmount * 98) / 100;
+
+        // Mock the Uniswap router to simulate receiving less ETH than expected
+        uint256 insufficientEthAmount = (expectedEthAmount * 97) / 100; // 3% less than minimum
+
+        vm.mockCall(
+            address(_SWAP_ROUTER),
+            abi.encodeWithSelector(ISwapRouter.exactInputSingle.selector),
+            abi.encode(insufficientEthAmount)
+        );
+
+        // Expect the withdrawal to revert due to slippage exceeding 2%
+        vm.startPrank(alice);
+        vm.expectRevert(); // The exact revert message depends on Uniswap Router
+        humanResources.withdrawSalary();
+        vm.stopPrank();
+    }
+
+    function test_getHrManager() public {
+        assertEq(humanResources.hrManager(), hrManager);
+    }
+
+    function test_getActiveEmployeeCount() public {
+        assertEq(humanResources.getActiveEmployeeCount(), 0);
+        _registerEmployee(alice, aliceSalary);
+        assertEq(humanResources.getActiveEmployeeCount(), 1);
+        _registerEmployee(bob, bobSalary);
+        assertEq(humanResources.getActiveEmployeeCount(), 2);
+    }
+
+    function test_getEmployeeInfo() public {
+        // Non-existent employee
+        (uint256 weeklySalary0, uint256 employedSince0, uint256 terminatedAt0) = humanResources.getEmployeeInfo(alice);
+        assertEq(weeklySalary0, 0);
+        assertEq(employedSince0, 0);
+        assertEq(terminatedAt0, 0);
+        
+        // Existing employee
+        _registerEmployee(alice, aliceSalary);
+        uint256 currentTime1 = block.timestamp;
+
+        (uint256 weeklySalary1, uint256 employedSince1, uint256 terminatedAt1) = humanResources.getEmployeeInfo(alice);
+        assertEq(weeklySalary1, aliceSalary);
+        assertEq(employedSince1, currentTime1);
+        assertEq(terminatedAt1, 0);
+
+        skip(2 days);
+
+        vm.prank(hrManager);
+        humanResources.terminateEmployee(alice);
+
+        (uint256 weeklySalary2, uint256 employedSince2, uint256 terminatedAt2) = humanResources.getEmployeeInfo(alice);
+        assertEq(weeklySalary2, aliceSalary);
+        assertEq(employedSince2, currentTime1);
+        assertEq(terminatedAt2, currentTime1 + 2 days);
+
+        skip(1 days);
+
+        _registerEmployee(alice, aliceSalary * 2);
+        uint256 currentTime2 = block.timestamp;
+
+        (uint256 weeklySalary3, uint256 employedSince3, uint256 terminatedAt3) = humanResources.getEmployeeInfo(alice);
+        assertEq(weeklySalary3, aliceSalary * 2);
+        assertEq(employedSince3, currentTime2);
+        assertEq(terminatedAt3, 0);
+
+    }
+
+    function test_salaryAvailable() public {
+        // Non-existent employee
+        assertEq(humanResources.salaryAvailable(alice), 0);
+
+        // Existing employee
+        _registerEmployee(alice, aliceSalary);
+
+        assertEq(humanResources.salaryAvailable(alice), 0);
+
+        skip(2 days);
+
+        assertEq(
+            humanResources.salaryAvailable(alice),
+            ((aliceSalary / 1e12) * 2) / 7
+        );
+
+        skip(5 days);
+
+        assertEq(humanResources.salaryAvailable(alice), aliceSalary / 1e12);
+
+    }
+
+    // helper functions
+    
     function _registerEmployee(address employeeAddress, uint256 salary) public {
         vm.prank(hrManager);
         humanResources.registerEmployee(employeeAddress, salary);
@@ -185,4 +381,6 @@ contract HumanResourcesTest is Test {
             .with_key(account_)
             .checked_write(amount_);
     }
+    
+
 }

@@ -2,20 +2,17 @@
 pragma solidity ^0.8.24;
 
 import "./interfaces/IHumanResources.sol";
+import "@forge-std/src/console.sol";
 
-import "../lib/v3-periphery/contracts/interfaces/ISwapRouter.sol";
-import {AggregatorV3Interface} from "../lib/chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
-import {IERC20} from "../lib/openzeppelin-contracts/contracts/token/ERC20/IERC20.sol";
+import {ISwapRouter} from "@uniswap/v3-periphery/contracts/interfaces/ISwapRouter.sol";
+import {IWETH9} from "@uniswap/v3-periphery/contracts/interfaces/external/IWETH9.sol";
+import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interfaces/AggregatorV3Interface.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 // Security
-import {SafeERC20} from "../lib/openzeppelin-contracts/contracts/token/ERC20/utils/SafeERC20.sol";
-import {ReentrancyGuard} from "../lib/openzeppelin-contracts/contracts/utils/ReentrancyGuard.sol";
-import {Address} from "../lib/openzeppelin-contracts/contracts/utils/Address.sol";
-
-
-interface IWETH9 {
-    function withdraw(uint256 wad) external;
-} 
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {Address} from "@openzeppelin/contracts/utils/Address.sol";
 
 
 contract HumanResources is IHumanResources, ReentrancyGuard {
@@ -89,6 +86,7 @@ contract HumanResources is IHumanResources, ReentrancyGuard {
         emp.employedSince = block.timestamp;
         emp.lastWithdrawalTime = block.timestamp;
         emp.prefersEth = false;
+        emp.terminatedAt = 0;
 
         activeEmployeeCount += 1;
 
@@ -138,8 +136,6 @@ contract HumanResources is IHumanResources, ReentrancyGuard {
     
     
     function swapUSDCToETH(uint256 usdcAmount) internal returns (uint256 ethAmount) {
-        require(usdcAmount > 0, "Amount must be greater than zero");
-        
         // Approve the router to spend USDC
         usdcToken.safeIncreaseAllowance(address(swapRouter), usdcAmount / 1e12); // USDC has 6 decimals
 
@@ -161,6 +157,12 @@ contract HumanResources is IHumanResources, ReentrancyGuard {
 
         uint256 wethReceived = swapRouter.exactInputSingle(params);
 
+        console.log("Expected minimum WETH: ", expectedAmountOutMinimum);
+        console.log("WETH received: ", wethReceived);
+        if (wethReceived < expectedAmountOutMinimum) {
+            revert("Slippage exceeds 2%");
+        }
+
         // Unwrap WETH to ETH
         IWETH9(WETH9).withdraw(wethReceived);
 
@@ -169,6 +171,10 @@ contract HumanResources is IHumanResources, ReentrancyGuard {
 
 
     function switchCurrency() external override onlyEmployee() {
+
+        if (!employees[msg.sender].isActive) {
+            revert EmployeeNotRegistered();
+        }
         
         withdrawSalary(); // this is why withdrawSalary is public
 
@@ -211,7 +217,7 @@ contract HumanResources is IHumanResources, ReentrancyGuard {
 
         Employee storage emp = employees[_employee];
 
-        if (!employees[_employee].isActive) {
+        if (!emp.isActive && emp.employedSince == 0 && emp.totalUsdSalaries == 0) {
             return 0;
         }// employee not registered
 
@@ -241,7 +247,7 @@ contract HumanResources is IHumanResources, ReentrancyGuard {
     function getEmployeeInfo(address _employee) external view override returns (uint256, uint256, uint256) {
         Employee storage emp = employees[_employee];
 
-        if (!employees[_employee].isActive) {
+        if (!emp.isActive && emp.employedSince == 0 && emp.totalUsdSalaries == 0) {
             return (0, 0, 0);
         }// employee not registered
 
@@ -251,5 +257,4 @@ contract HumanResources is IHumanResources, ReentrancyGuard {
 
     receive() external payable {}
 }
-
 
