@@ -1,4 +1,4 @@
-# 🏢 HRManager Solidity Project
+# 🏢 HRManager
 
 This repository contains the **HRManager** Solidity smart contract, designed to implement a **Human Resources (HR) Payment System** on the **Optimism blockchain**. It enables HR managers to efficiently manage employee registrations, terminations, and salary withdrawals, while ensuring secure and transparent payments.
 
