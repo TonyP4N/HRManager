@@ -43,7 +43,6 @@ contract HumanResources is IHumanResources, ReentrancyGuard {
         uint256 terminatedAt;
         uint256 lastWithdrawalTime;
         uint256 totalUsdSalaries;
-        uint activeEmployeeCount;
         bool isActive;
         bool prefersEth;
     }
@@ -188,7 +187,7 @@ contract HumanResources is IHumanResources, ReentrancyGuard {
 
 
     function withdrawSalary() public override onlyEmployee nonReentrant {
-        
+
         Employee storage emp = employees[msg.sender]; // get employee info from database
 
         uint256 endTime = emp.isActive ? block.timestamp : emp.terminatedAt;
@@ -203,6 +202,8 @@ contract HumanResources is IHumanResources, ReentrancyGuard {
 
         if (emp.prefersEth) {
             uint256 ethAmount = swapUSDCToETH(totalAmount);
+            (bool success, ) = msg.sender.call{value: ethAmount}("");
+            require(success, "Transfer failed.");
             payable(msg.sender).transfer(ethAmount);
             emit SalaryWithdrawn(msg.sender, true, ethAmount);
         } else {
